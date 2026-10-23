@@ -192,22 +192,22 @@ function _tmapreduce(f::F,
     check_all_have_same_indices(Arrs)
     throw_if_boxed_captures(f, op)
     if chunking_enabled(scheduler)
-        tasks = map(zip(Iterators.cycle(thread_ids(scheduler)), _index_chunks(scheduler, first(Arrs)))) do (c, inds)
+        tasks = map(zip(Iterators.cycle(thread_ids(scheduler)), Iterators.countfrom(), _index_chunks(scheduler, first(Arrs)))) do (c, cnt, inds)
             tid = @inbounds nthtid(mod1(c, nt))
             args = map(A -> view(A, inds), Arrs)
             # Note, calling `promise_task_local` here is only safe because we're assuming that
             # Base.mapreduce isn't going to magically try to do multithreading on us...
-            @spawnat tid mapreduce(promise_task_local(f, c), promise_task_local(op), args...;
+            @spawnat tid mapreduce(promise_task_local(f, cnt), promise_task_local(op), args...;
                 mapreduce_kwargs...)
         end
         # Note, calling `promise_task_local` here is only safe because we're assuming that
         # Base.mapreduce isn't going to magically try to do multithreading on us...
         mapreduce(fetch, promise_task_local(op), tasks)
     else
-        tasks = map(zip(Iterators.cycle(thread_ids(scheduler)), eachindex(first(Arrs)))) do (c, i)
+        tasks = map(zip(Iterators.cycle(thread_ids(scheduler)), Iterators.countfrom(), eachindex(first(Arrs)))) do (c, cnt, i)
             tid = @inbounds nthtid(mod1(c, nt))
             args = map(A -> @inbounds(A[i]), Arrs)
-            @spawnat tid promise_task_local(f, c)(args...)
+            @spawnat tid promise_task_local(f, cnt)(args...)
         end
         # Note, calling `promise_task_local` here is only safe because we're assuming that
         # Base.mapreduce isn't going to magically try to do multithreading on us...
@@ -226,11 +226,11 @@ function _tmapreduce(f::F,
     throw_if_boxed_captures(f, op)
     chnks = only(Arrs)
     nt = nthreads()
-    tasks = map(zip(Iterators.cycle(thread_ids(scheduler)), chnks)) do (c, idcs)
+    tasks = map(zip(Iterators.cycle(thread_ids(scheduler)), Iterators.countfrom(), chnks)) do (c, cnt, idcs)
         tid = @inbounds nthtid(mod1(c, nt))
         # Note, calling `promise_task_local` here is only safe because we're assuming that
         # Base.mapreduce isn't going to magically try to do multithreading on us...
-        @spawnat tid promise_task_local(f, c)(idcs)
+        @spawnat tid promise_task_local(f, cnt)(idcs)
     end
     # Note, calling `promise_task_local` here is only safe because we're assuming that
     # Base.mapreduce isn't going to magically try to do multithreading on us...
@@ -292,12 +292,12 @@ function _greedy_spawn(f::F, op::OP, Arrs::Tuple{Vararg{GreedyConcurrentReadArra
         end
     else
         nt = nthreads()
-        tasks = map(Iterators.take(Iterators.cycle(thread_ids(scheduler)), scheduler.ntasks)) do c
+        tasks = map(enumerate(Iterators.take(Iterators.cycle(thread_ids(scheduler)), scheduler.ntasks))) do (cnt, c)
             tid = @inbounds nthtid(mod1(c, nt))
             # Note, calling `promise_task_local` here is only safe because we're assuming that
             # Base.mapreduce isn't going to magically try to do multithreading on us...
             @spawnat tid begin
-                local_f = promise_task_local(f, c)
+                local_f = promise_task_local(f, cnt)
                 mapreduce(promise_task_local(op), ch; mapreduce_kwargs...) do i
                     args = map(A -> @inbounds(A[i]), Arrs)
                     local_f(args...)
@@ -328,12 +328,12 @@ function _greedy_spawn(f::F, op::OP, Arrs, ntasks, scheduler::GreedyScheduler, c
         end
     else
         nt = nthreads()
-        tasks = map(Iterators.take(Iterators.cycle(thread_ids(scheduler)), scheduler.ntasks)) do c
+        tasks = map(enumerate(Iterators.take(Iterators.cycle(thread_ids(scheduler)), scheduler.ntasks))) do (cnt, c)
             tid = @inbounds nthtid(mod1(c, nt))
             # Note, calling `promise_task_local` here is only safe because we're assuming that
             # Base.mapreduce isn't going to magically try to do multithreading on us...
             @spawnat tid begin
-                local_f = promise_task_local(f, c)
+                local_f = promise_task_local(f, cnt)
                 mapreduce(promise_task_local(op), ch; mapreduce_kwargs...) do args
                     local_f(args...)
                 end
@@ -421,12 +421,12 @@ function _tmapreduce(f::F,
         end
     else
         nt = nthreads()
-        tasks = map(Iterators.take(Iterators.cycle(thread_ids(scheduler)), scheduler.ntasks)) do c
+        tasks = map(enumerate(Iterators.take(Iterators.cycle(thread_ids(scheduler)), scheduler.ntasks))) do (cnt, c)
             tid = @inbounds nthtid(mod1(c, nt))
             # Note, calling `promise_task_local` here is only safe because we're assuming that
             # Base.mapreduce isn't going to magically try to do multithreading on us...
             @spawnat tid begin
-                local_f = promise_task_local(f, c)
+                local_f = promise_task_local(f, cnt)
                 mapreduce(promise_task_local(op), ch; mapreduce_kwargs...) do inds
                     args = map(A -> view(A, inds), Arrs)
                     mapreduce(local_f, promise_task_local(op), args...)
@@ -623,9 +623,9 @@ function _tmap(scheduler::StaticScheduler{NoChunking},
         _Arrs::AbstractArray...) where {F}
     nt = nthreads()
     throw_if_boxed_captures(f)
-    tasks = map(zip(Iterators.cycle(thread_ids(scheduler)), A)) do (c, idcs)
+    tasks = map(zip(Iterators.cycle(thread_ids(scheduler)), Iterators.countfrom(), A)) do (c, cnt, idcs)
         tid = @inbounds nthtid(mod1(c, nt))
-        @spawnat tid promise_task_local(f, c)(idcs)
+        @spawnat tid promise_task_local(f, cnt)(idcs)
     end
     map(fetch, tasks)
 end
@@ -638,11 +638,11 @@ function _tmap(scheduler::StaticScheduler{NoChunking},
     Arrs = (A, _Arrs...)
     nt = nthreads()
     throw_if_boxed_captures(f)
-    tasks = map(zip(Iterators.cycle(thread_ids(scheduler)), eachindex(A))) do (c, i)
+    tasks = map(zip(Iterators.cycle(thread_ids(scheduler)), Iterators.countfrom(), eachindex(A))) do (c, cnt, i)
         tid = @inbounds nthtid(mod1(c, nt))
         @spawnat tid begin
             args = map(A -> A[i], Arrs)
-            promise_task_local(f, c)(args...)
+            promise_task_local(f, cnt)(args...)
         end
     end
     v = map(fetch, tasks)
