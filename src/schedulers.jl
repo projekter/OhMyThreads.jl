@@ -165,7 +165,8 @@ kind of scheduler.
 function default_nchunks end
 default_nchunks(::Type{<:Scheduler}) = nthreads(:default)
 
-allow_migration(::Scheduler) = false
+function allow_migration end # defined for all schedulers
+function thread_ids end # defined only if allow_migration = false
 
 """
     DynamicScheduler (aka :dynamic)
@@ -272,9 +273,13 @@ Isn't well composable with other multithreaded code though.
     * Determines how the collection is divided into chunks. By default, each chunk consists of contiguous elements and order is maintained.
     * See [ChunkSplitters.jl](https://github.com/JuliaFolds2/ChunkSplitters.jl) for more details and available options. We also allow users to pass `:consecutive` in place of `Consecutive()`, and `:roundrobin` in place of `RoundRobin()`
     * Beware that for `split=OhMyThreads.RoundRobin()` the order of elements isn't maintained and a reducer function must not only be associative but also **commutative**!
+- `thread_ids` (default `1:ntasks` or `1:nthreads()`):
+    * Controls task migration. An iterable containing the thread ids the tasks will be stickily assigned to.
+    * While this allows a task to always be executed by the same thread, it does not mean that the thread will always be executed on the same CPU. See the `ThreadPinning.jl` package for this.
 """
-struct StaticScheduler{C <: ChunkingMode, S <: Split} <: Scheduler
+struct StaticScheduler{C <: ChunkingMode, S <: Split, T} <: Scheduler
     chunking_args::ChunkingArgs{C, S}
+    thread_ids::T
 end
 
 function StaticScheduler(;
@@ -283,7 +288,8 @@ function StaticScheduler(;
         chunksize = nothing,
         minchunksize = nothing,
         split::Union{Split, Symbol} = Consecutive(),
-        chunking::Bool = true
+        chunking::Bool = true,
+        thread_ids = Base.OneTo(isnothing(ntasks) ? (isnothing(nchunks) ? default_nchunks(StaticScheduler) : nchunks) : ntasks)
 )
     if !isnothing(ntasks)
         if !isnothing(nchunks)
@@ -293,15 +299,18 @@ function StaticScheduler(;
     end
     ca = ChunkingArgs(StaticScheduler;
         n = nchunks, size = chunksize, minsize = minchunksize, split, chunking)
-    return StaticScheduler(ca)
+    return StaticScheduler(ca, thread_ids)
 end
 from_symbol(::Val{:static}) = StaticScheduler
 chunking_args(sched::StaticScheduler) = sched.chunking_args
+allow_migration(::StaticScheduler) = false
+thread_ids(sched::StaticScheduler) = sched.thread_ids
 
 function Base.show(io::IO, mime::MIME{Symbol("text/plain")}, s::StaticScheduler)
     print(io, "StaticScheduler", "\n")
     cstr = _chunkingstr(s.chunking_args)
     println(io, "├ Chunking: ", cstr)
+    println(io, "├ Assigned thread ids: ", thread_ids(s))
     print(io, "└ Threadpool: default")
 end
 
@@ -338,18 +347,19 @@ some additional overhead.
 - `split::Union{Symbol, OhMyThreads.Split}` (default `OhMyThreads.RoundRobin()`):
     * Determines how the collection is divided into chunks (if chunking=true).
     * See [ChunkSplitters.jl](https://github.com/JuliaFolds2/ChunkSplitters.jl) for more details and available options. We also allow users to pass `:consecutive` in place of `Consecutive()`, and `:roundrobin` in place of `RoundRobin()`
-- `migration::Bool` (default `true`):
-    * Controls whether tasks are allowed to migrate between threads (`true`) or not (`false`).
-    * For `migration=false`, a task will always be executed by the same thread; however, this does not mean that the thread will always be executed on the same CPU. See the `ThreadPinning.jl` package for this.
+- `thread_ids` (default `nothing`):
+    * Controls task migration. If `nothing`, tasks will migrate between threads; else, set this to an iterable containing the thread ids the tasks will be stickily assigned to.
+    * The parameter may be set to `:sticky`, which will assign the range `1:ntasks` threads.
+    * While this allows a task to always be executed by the same thread, it does not mean that the thread will always be executed on the same CPU. See the `ThreadPinning.jl` package for this.
 """
-struct GreedyScheduler{C <: ChunkingMode, S <: Split} <: Scheduler
+struct GreedyScheduler{C <: ChunkingMode, S <: Split, T} <: Scheduler
     ntasks::Int
     chunking_args::ChunkingArgs{C, S}
-    migration::Bool
+    thread_ids::T
 
-    function GreedyScheduler(ntasks::Integer, ca::ChunkingArgs, migration::Bool)
+    function GreedyScheduler(ntasks::Integer, ca::ChunkingArgs, thread_ids=nothing)
         ntasks > 0 || throw(ArgumentError("ntasks must be a positive integer"))
-        return new{chunking_mode(ca), typeof(ca.split)}(ntasks, ca, migration)
+        return new{chunking_mode(ca), typeof(ca.split), typeof(thread_ids)}(ntasks, ca, thread_ids)
     end
 end
 
@@ -360,19 +370,23 @@ function GreedyScheduler(;
         minchunksize = nothing,
         split::Union{Split, Symbol} = RoundRobin(),
         chunking::Bool = false,
-        migration::Bool = true
+        thread_ids = nothing
 )
     if !(isnothing(nchunks) && isnothing(chunksize))
         chunking = true
     end
     ca = ChunkingArgs(GreedyScheduler;
         n = nchunks, size = chunksize, minsize = minchunksize, split, chunking)
-    return GreedyScheduler(ntasks, ca, migration)
+    if thread_ids === :sticky
+        thread_ids = Base.OneTo(ntasks)
+    end
+    return GreedyScheduler(ntasks, ca, thread_ids)
 end
 from_symbol(::Val{:greedy}) = GreedyScheduler
 chunking_args(sched::GreedyScheduler) = sched.chunking_args
 default_nchunks(::Type{GreedyScheduler}) = 10 * nthreads(:default)
-allow_migration(sched::GreedyScheduler) = sched.migration
+allow_migration(sched::GreedyScheduler) = isnothing(sched.thread_ids)
+thread_ids(sched::GreedyScheduler) = sched.thread_ids
 
 function Base.show(io::IO, mime::MIME{Symbol("text/plain")}, s::GreedyScheduler)
     print(io, "GreedyScheduler", "\n")
@@ -380,6 +394,7 @@ function Base.show(io::IO, mime::MIME{Symbol("text/plain")}, s::GreedyScheduler)
     cstr = _chunkingstr(s)
     println(io, "├ Chunking: ", cstr)
     println(io, "├ Task migration: ", allow_migration(s))
+    allow_migration(s) || println(io, "├ Assigned thread ids: ", thread_ids(s))
     print(io, "└ Threadpool: default")
 end
 
@@ -399,5 +414,7 @@ struct SerialScheduler <: Scheduler
     SerialScheduler(; _...) = new()
 end
 from_symbol(::Val{:serial}) = SerialScheduler
+allow_migration(::SerialScheduler) = false
+thread_ids(::SerialScheduler) = (1,)
 
 end # module

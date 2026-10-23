@@ -32,7 +32,7 @@ ChunkedGreedy(; kwargs...) = GreedyScheduler(; kwargs...)
                             if sched == GreedyScheduler
                                 scheduler = sched(; ntasks = nchunks, minchunksize)
                             elseif sched == :GreedySchedulerNoMig
-                                scheduler = GreedyScheduler(; ntasks = nchunks, minchunksize, migration = false)
+                                scheduler = GreedyScheduler(; ntasks = nchunks, minchunksize, thread_ids = :sticky)
                             elseif sched == DynamicScheduler{OhMyThreads.Schedulers.NoChunking}
                                 scheduler = DynamicScheduler(; chunking = false)
                             elseif sched == SerialScheduler
@@ -1167,12 +1167,14 @@ end
     @test repr("text/plain", StaticScheduler()) ==
           """StaticScheduler
           ├ Chunking: fixed count ($nt), split :consecutive
+          ├ Assigned thread ids: Base.OneTo($nt)
           └ Threadpool: default"""
 
     @test repr("text/plain", StaticScheduler(; chunksize = 2, split = :scatter)) ==
           """
           StaticScheduler
           ├ Chunking: fixed size (2), split :roundrobin
+          ├ Assigned thread ids: Base.OneTo($nt)
           └ Threadpool: default"""
 
     @test repr("text/plain", GreedyScheduler(; chunking = true)) ==
@@ -1183,12 +1185,13 @@ end
          ├ Task migration: true
          └ Threadpool: default"""
 
-    @test repr("text/plain", GreedyScheduler(; chunking = true, migration = false)) ==
+    @test repr("text/plain", GreedyScheduler(; chunking = true, thread_ids = :sticky)) ==
           """
          GreedyScheduler
          ├ Num. tasks: $nt
          ├ Chunking: fixed count ($(10 * nt)), split :roundrobin
          ├ Task migration: false
+         ├ Assigned thread ids: Base.OneTo($nt)
          └ Threadpool: default"""
 end
 
